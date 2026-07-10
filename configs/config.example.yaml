@@ -1,0 +1,43 @@
+# Steward agent configuration (the daemon's own config).
+# Per-repo deployment behavior lives in each repo's committed .steward.yaml.
+
+listen: "127.0.0.1:8484"   # keep loopback-only; Nginx terminates TLS and proxies here
+trust_proxy: true          # honor X-Forwarded-For / X-Real-Ip set by Nginx
+data_dir: /var/lib/steward
+# lock_file: /var/lib/steward/steward.lock
+shutdown_grace: 2m         # how long in-flight deployments may finish on SIGTERM
+
+webhook:
+  # The GitHub webhook secret, one of (checked in this order):
+  # secret: "inline-secret"
+  secret_file: /etc/steward/webhook.secret
+  # ...or $STEWARD_WEBHOOK_SECRET
+  path: /webhook/github
+
+github:
+  # Token for the Commit Statuses API (repo:status scope). Optional — commit
+  # statuses are skipped when absent. Also read from
+  # $STEWARD_GITHUB_TOKEN or $GITHUB_TOKEN.
+  token_file: /etc/steward/github.token
+  # api_url: https://api.github.com
+
+telegram:
+  # Bot token from @BotFather. Optional — Telegram notifications are skipped
+  # when absent. Also read from $STEWARD_TELEGRAM_TOKEN.
+  # The token lives HERE, not in a repo's .steward.yaml: manifests are
+  # committed to application repos and must not carry credentials.
+  token_file: /etc/steward/telegram.token
+  # api_server: https://api.telegram.org   # or a self-hosted Bot API server
+
+defaults:
+  deploy_mode: queue       # used until a project's manifest has been read once
+  # max_queue: 8           # deprecated and ignored: queue mode coalesces
+                           # to the newest pending push
+
+projects:
+  - repo: alex/my-awesome-app        # owner/name exactly as GitHub reports it
+    branch: main                     # deploy on pushes to this branch
+    # name: my-awesome-app           # default: repo name
+    # clone_url: git@github.com:alex/my-awesome-app.git
+    # dir: /var/lib/steward/checkouts/my-awesome-app
+    # manifest: .steward.yaml

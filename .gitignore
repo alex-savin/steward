@@ -1,0 +1,6 @@
+bin/
+dist/
+data/
+*.secret
+.env
+.DS_Store

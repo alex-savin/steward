@@ -1,0 +1,71 @@
+name: Steward Dispatch
+description: >-
+  Trigger a Steward deployment by sending an HMAC-signed, push-shaped
+  webhook, optionally waiting for the resulting commit status.
+
+inputs:
+  url:
+    description: 'Full webhook URL of the agent, e.g. https://deploy.example.com/webhook/github'
+    required: true
+  secret:
+    description: "The agent's webhook secret (pass a repository/environment secret)"
+    required: true
+  ref:
+    description: 'Ref to deploy; must match the project branch configured on the agent'
+    required: false
+    default: ${{ github.ref }}
+  sha:
+    description: 'Commit SHA to deploy (must already be pushed to the origin)'
+    required: false
+    default: ${{ github.sha }}
+  message:
+    description: 'One-line description surfaced in agent logs and ntfy notifications'
+    required: false
+    default: ''
+  wait:
+    description: 'Poll the steward commit status until the deployment finishes'
+    required: false
+    default: 'false'
+  status-context:
+    description: 'Commit status context to poll (default: steward/<repo name>)'
+    required: false
+    default: ''
+  timeout:
+    description: 'Seconds to poll before failing when wait is true'
+    required: false
+    default: '900'
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch deployment
+      shell: bash
+      env:
+        STEWARD_URL: ${{ inputs.url }}
+        STEWARD_WEBHOOK_SECRET: ${{ inputs.secret }}
+        STEWARD_MESSAGE: ${{ inputs.message }}
+        GITHUB_REF: ${{ inputs.ref }}
+        GITHUB_SHA: ${{ inputs.sha }}
+        # `gh` needs a token only when wait is true.
+        GH_TOKEN: ${{ github.token }}
+        WAIT: ${{ inputs.wait }}
+        TIMEOUT: ${{ inputs.timeout }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+      # Composite steps run under `bash -e`, where a bare `[[ cond ]] && cmd`
+      # fails the step when cond is false. Use explicit if blocks.
+      run: |
+        args=()
+        if [[ "$WAIT" == "true" ]]; then
+          args+=(--wait --timeout "$TIMEOUT")
+        fi
+        if [[ -n "$STATUS_CONTEXT" ]]; then
+          args+=(--status-context "$STATUS_CONTEXT")
+        fi
+        # GITHUB_ACTION_PATH is <action repo root>/.github/actions/steward-dispatch,
+        # whether this action was referenced remotely or checked out locally.
+        script="${GITHUB_ACTION_PATH}/../../../scripts/steward-dispatch.sh"
+        if [[ ! -x "$script" ]]; then
+          echo "::error::steward-dispatch.sh not found at $script" >&2
+          exit 1
+        fi
+        "$script" ${args[@]+"${args[@]}"}

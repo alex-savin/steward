@@ -1,0 +1,7 @@
+# Everything under secrets/ is encrypted to the deploy host's age public key.
+# Add a teammate by appending their public key, then:
+#   sops updatekeys secrets/production.enc.env
+creation_rules:
+  - path_regex: secrets/.*\.enc\.(env|txt)$
+    age: >-
+      age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p

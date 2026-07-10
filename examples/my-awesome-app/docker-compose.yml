@@ -1,0 +1,41 @@
+# Deployed by `docker compose -f docker-compose.yml up -d --remove-orphans`,
+# run by the agent from inside this checkout.
+services:
+  app:
+    # STEWARD_SHA is exported by the agent: the exact commit being deployed.
+    # An immutable tag guarantees compose pulls rather than reusing a stale
+    # local image, and makes rollback resolve to the previous commit's image.
+    image: ghcr.io/alex-savin/my-awesome-app:sha-${STEWARD_SHA}
+    restart: unless-stopped
+    # Written 0600 by the SOPS step from secrets/production.enc.env.
+    env_file:
+      - .env
+    ports:
+      - '8080:8080'
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    # Named `database` to match `dependencies[].name` in .steward.yaml, so the
+    # agent starts it before the rest of the stack.
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      # Snapshotted before every deploy; restored on rollback.
+      - /var/lib/homelab/app_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password.txt   # decrypted by the SOPS step

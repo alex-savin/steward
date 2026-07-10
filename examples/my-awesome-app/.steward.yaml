@@ -1,0 +1,52 @@
+project: my-awesome-app
+environment: production
+stack: docker-compose        # or: quadlet — see quadlets/
+
+deployment:
+  # Overlapping pushes queue up rather than racing. `reject` answers 409 instead.
+  mode: queue
+  timeout: 10m               # covers secrets + backup + deploy + verify
+
+secrets:
+  provider: sops
+  key_file: /opt/steward/keys/age.txt   # the age identity, on the host
+  files:
+    - source: secrets/production.enc.env
+      destination: .env                          # compose reads this via env_file
+    - source: secrets/pg_password.enc.txt
+      destination: secrets/pg_password.txt       # compose docker-secret
+
+backup:
+  retention:
+    keep_last: 3
+  commands:
+    # Runs BEFORE the volume copies, and writes into a directory that is itself
+    # a backup volume — so this dump lands in *this* deploy's snapshot.
+    # STEWARD_BACKUP_STAMP is exported by the agent.
+    - docker exec my-awesome-app-database-1 pg_dump -U postgres myapp
+        > /var/lib/homelab/app_data/dump-${STEWARD_BACKUP_STAMP}.sql
+  volumes:
+    - source: /var/lib/homelab/app_data
+      destination: /opt/backups/my-awesome-app/
+
+dependencies:
+  # Matches the compose service name (or the quadlet unit base name).
+  - name: database
+    type: postgres
+    start_first: true
+
+health_check:
+  type: http
+  endpoint: http://localhost:8080/healthz
+  timeout: 30s               # per attempt
+  retries: 3                 # linear backoff: 2s, 4s
+
+notifications:
+  ntfy:
+    topic: homelab_deployments
+    server: https://ntfy.mydomain.com
+  telegram:
+    # Quote it: YAML would read -100... as a number. The bot token is
+    # agent-side config, never in this committed file.
+    chat_id: "-1001234567890"
+    silent: true

@@ -1,0 +1,21 @@
+# systemd does NOT expand ${STEWARD_SHA} in Image=, so a quadlet stack pins
+# either a moving tag with Pull=newer (below) or a literal tag that CI bumps.
+# See docs/github-actions.md § Pinning the image to the commit.
+[Unit]
+Description=my-awesome-app web
+Requires=database.service
+After=database.service
+
+[Container]
+ContainerName=my-awesome-app-web
+Image=ghcr.io/alex-savin/my-awesome-app:main
+Pull=newer
+Network=my-awesome-app.network
+PublishPort=8080:8080
+EnvironmentFile=%h/checkouts/my-awesome-app/.env
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

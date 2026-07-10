@@ -1,0 +1,60 @@
+# .steward.yaml — committed to the ROOT of each deployed repository.
+
+project: my-awesome-app
+environment: production
+stack: quadlet # or docker-compose
+
+# Manages deployment concurrency to prevent race conditions
+deployment:
+  mode: queue # Options: queue, reject (if another deployment is running)
+  timeout: 10m
+
+# Seamlessly integrates encrypted secrets committed to Git
+secrets:
+  provider: sops
+  key_file: /opt/steward/keys/age.txt
+  files:
+    - source: secrets/production.enc.env
+      destination: .env
+
+# Automated backup and rotation policy
+backup:
+  retention:
+    keep_last: 3
+  volumes:
+    - source: /var/lib/homelab/app_data
+      destination: /opt/backups/my-awesome-app/
+  commands:
+    - docker exec db-1 pg_dump -U postgres myapp > /tmp/backup.sql
+
+# Defines container dependencies and startup order
+dependencies:
+  - name: database
+    type: postgres
+    start_first: true
+
+# How to verify the deployment was successful
+health_check:
+  type: http
+  endpoint: http://localhost:8080/healthz
+  timeout: 30s
+  retries: 3
+
+# Local homelab notifications. Both channels are optional and independent.
+notifications:
+  ntfy:
+    topic: homelab_deployments
+    server: https://ntfy.mydomain.com
+  telegram:
+    # Numeric chat id (negative for groups/channels) or "@channelusername".
+    # Quote it: YAML would otherwise parse -100... as a number.
+    # The bot token is agent-side config, never here.
+    chat_id: "-1001234567890"
+    # message_thread_id: 42   # a topic inside a forum supergroup
+    # silent: true            # deliver without a notification sound
+
+# Optional driver tuning (defaults shown):
+# compose:
+#   file: docker-compose.yml   # default: first existing of compose.yaml/.yml, docker-compose.yml/.yaml
+# quadlet:
+#   dir: quadlets              # repo dir holding *.container / *.pod / *.network / *.volume units

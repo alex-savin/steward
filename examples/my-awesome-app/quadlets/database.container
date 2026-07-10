@@ -1,0 +1,21 @@
+# Installed to ~/.config/containers/systemd/database.container by the agent,
+# which then runs `systemctl --user daemon-reload` and restarts database.service.
+# Started before app.service because .steward.yaml marks it start_first.
+[Unit]
+Description=my-awesome-app postgres
+
+[Container]
+ContainerName=my-awesome-app-database
+Image=docker.io/library/postgres:16-alpine
+Network=my-awesome-app.network
+Environment=POSTGRES_DB=myapp POSTGRES_USER=postgres
+EnvironmentFile=%h/checkouts/my-awesome-app/.env
+Volume=/var/lib/homelab/app_data:/var/lib/postgresql/data:Z
+HealthCmd=pg_isready -U postgres
+HealthStartPeriod=5s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

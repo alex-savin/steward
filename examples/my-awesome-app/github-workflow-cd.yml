@@ -1,0 +1,81 @@
+# Copy to .github/workflows/cd.yml in the APPLICATION repo.
+#
+# It is named `github-workflow-cd.yml` here so GitHub does not try to run it
+# from the agent's own repository.
+#
+# Requires two secrets on the application repo (or on its `production`
+# environment):  STEWARD_URL, STEWARD_WEBHOOK_SECRET
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write   # push images to GHCR
+  statuses: read    # poll the steward commit status when wait: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - run: go test ./...
+
+      # Catch a .steward.yaml typo here, not by failing a real deployment.
+      - name: Validate the deployment manifest
+        run: |
+          curl -sSL -o /tmp/steward \
+            https://github.com/alex-savin/steward/releases/latest/download/steward-linux-amd64
+          chmod +x /tmp/steward
+          /tmp/steward validate .steward.yaml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          # Proxmox nodes are amd64; the Mac Minis are arm64.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository }}:main
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production      # add required reviewers here to gate the deploy
+    steps:
+      - name: Deploy to homelab
+        uses: alex-savin/steward/.github/actions/steward-dispatch@v1
+        with:
+          url: ${{ secrets.STEWARD_URL }}
+          secret: ${{ secrets.STEWARD_WEBHOOK_SECRET }}
+          message: ${{ github.event.head_commit.message }}
+          # Block until the agent posts a terminal commit status, so a failed
+          # deploy (and its automatic rollback) turns this job red.
+          wait: 'true'
+          timeout: '900'
