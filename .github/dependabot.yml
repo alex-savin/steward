@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Go module dependencies (currently just gopkg.in/yaml.v3 and telego).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # The actions pinned in .github/workflows/ (checkout, setup-go, golangci-lint).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

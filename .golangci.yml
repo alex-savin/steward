@@ -1,0 +1,14 @@
+# golangci-lint configuration (v2 schema).
+# Default linters: errcheck, govet, ineffassign, staticcheck, unused.
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Deferred cleanup whose error we intentionally don't act on. Everything
+      # else (real error returns) is still checked.
+      exclude-functions:
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*github.com/alex-savin/steward/pkg/lockfile.Lock).Release
