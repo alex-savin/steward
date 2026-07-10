@@ -1,0 +1,40 @@
+name: Release
+
+# Cut a release by pushing a tag: `git tag v1.0.0 && git push origin v1.0.0`.
+# Publishes the four static binaries + SHA256SUMS, which is what the docs'
+# `steward validate` CI step downloads from releases/latest.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # needed to create the GitHub Release
+
+jobs:
+  release:
+    name: Build and publish binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history + tags so `git describe` stamps the version
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile and checksum
+        run: make checksums
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/steward-linux-amd64 \
+            dist/steward-linux-arm64 \
+            dist/steward-darwin-amd64 \
+            dist/steward-darwin-arm64 \
+            dist/SHA256SUMS
