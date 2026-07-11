@@ -59,6 +59,7 @@ type Manifest struct {
 	Stack       string `yaml:"stack"` // "quadlet" | "docker-compose"
 
 	Deployment    Deployment    `yaml:"deployment"`
+	Image         ImageConfig   `yaml:"image"`
 	Secrets       Secrets       `yaml:"secrets"`
 	Backup        Backup        `yaml:"backup"`
 	Dependencies  []Dependency  `yaml:"dependencies"`
@@ -68,6 +69,18 @@ type Manifest struct {
 	// Optional driver tuning; sensible defaults apply when omitted.
 	Compose ComposeOptions `yaml:"compose"`
 	Quadlet QuadletOptions `yaml:"quadlet"`
+}
+
+// ImageConfig enables image-centric deploys: the CD hook delivers the container
+// image to run, and Steward pulls it and pins it before restarting — rather
+// than the image tag being baked into the committed unit files.
+type ImageConfig struct {
+	// LocalTag is the stable tag the quadlet units' Image= lines reference
+	// (e.g. "localhost/go-nttd:live"). On a deploy carrying an image, Steward
+	// `podman tag`s the delivered image to this so the units run exactly it.
+	// Empty means no re-pinning — for compose, reference ${STEWARD_IMAGE} in
+	// the compose file instead.
+	LocalTag string `yaml:"local_tag"`
 }
 
 // Deployment manages concurrency to prevent race conditions and bounds the

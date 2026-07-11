@@ -16,12 +16,17 @@ import (
 // During rollback the same variables describe the commit being restored, not
 // the one that failed, so the previous version's compose file resolves to the
 // image it was originally deployed with.
-func jobEnv(m *config.Manifest, project, ref, sha string) []string {
+//
+// STEWARD_IMAGE carries the image-centric deploy target so a compose file can
+// use `image: ${STEWARD_IMAGE}` directly. During rollback it is the previous
+// (restored) image.
+func jobEnv(m *config.Manifest, project, ref, sha, image string) []string {
 	env := []string{
 		"STEWARD_PROJECT=" + project,
 		"STEWARD_SHA=" + sha,
 		"STEWARD_SHORT_SHA=" + shortSHA(sha),
 		"STEWARD_REF=" + ref,
+		"STEWARD_IMAGE=" + image,
 	}
 	if m != nil {
 		env = append(env,

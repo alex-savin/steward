@@ -21,7 +21,8 @@ type Job struct {
 	ID         string
 	Project    config.Project
 	Ref        string // e.g. refs/heads/main
-	SHA        string // commit to deploy (push payload "after")
+	SHA        string // commit to deploy (push payload "after"); empty for image-centric
+	Image      string // image to deploy (image-centric trigger); empty for git-driven
 	Pusher     string
 	Message    string // head commit subject line
 	ReceivedAt time.Time

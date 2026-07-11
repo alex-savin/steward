@@ -80,12 +80,31 @@ only name the *chat*.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `repo` | string | **required** | `owner/name`, matched case-insensitively against `repository.full_name`. |
+| `repo` | string | **required** unless `path` set | `owner/name`, matched case-insensitively against `repository.full_name`. |
 | `branch` | string | `main` | Deploy on pushes to this branch. |
-| `name` | string | the repo name | Keys the checkout dir, state file, and dispatcher queue. Must be unique. |
-| `clone_url` | string | `https://github.com/<repo>.git` | Use SSH for private repos. |
+| `name` | string | the repo name | Keys the checkout dir, state file, and dispatcher queue. Must be unique. Required for a `path` project. |
+| `clone_url` | string | `https://github.com/<repo>.git` | Use SSH for private repos. Mutually exclusive with `path`. |
 | `dir` | path | `<data_dir>/checkouts/<name>` | Must be unique across projects. |
-| `manifest` | path | `.steward.yaml` | Manifest path within the repo. |
+| `manifest` | path | `.steward.yaml` | Manifest path within the source. |
+| `path` | path | — | **Local project:** read the manifest + units from this absolute dir, no git clone. See below. |
+
+**Local (image-centric) projects.** Set `path` instead of `clone_url` to deploy
+from a directory already on the host — no repo clone. These projects are driven by
+an **image-centric trigger** (`deploy_image`), not a git push; a plain push to a
+local project is ignored. Match is by `name`:
+
+```yaml
+projects:
+  - name: firecrew
+    path: /opt/firecrew/src   # holds .steward.yaml + deploy/quadlet
+```
+
+Trigger a deploy with an HMAC-signed POST carrying the image (see
+[github-actions.md](github-actions.md#reference-the-dispatch-contract)):
+
+```jsonc
+{ "project": "firecrew", "deploy_image": "ghcr.io/alex-savin/go-nttd:sha-abc" }
+```
 
 The same repo on two branches needs two entries with **distinct `name` values** —
 the loader rejects a collision rather than letting staging clobber production's
@@ -136,6 +155,23 @@ nor the 30-second log capture after a failure.
 `mode` only takes effect once the agent has a checkout of the repo — see
 [the concurrency model](architecture.md#concurrency-model). In `queue` mode the
 queue holds at most one pending job: a newer push supersedes the one waiting.
+
+### `image` (image-centric deploys)
+
+```yaml
+image:
+  local_tag: localhost/go-nttd:live
+```
+
+Optional. When a deploy carries an image (a `deploy_image` trigger), Steward
+`podman pull`s it and re-tags `local_tag` to it before restarting — because a
+quadlet unit's `Image=` line is static, this is how a CD-delivered image reaches
+the running unit. Point the unit's `Image=` at `local_tag`. Rollback re-pins the
+previous image (stored as `last_good_image`), so don't aggressively prune old
+images.
+
+For a **compose** stack, omit this and reference `${STEWARD_IMAGE}` in the compose
+file instead — Steward exports it and `compose up` pulls it.
 
 ### `secrets`
 

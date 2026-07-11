@@ -234,6 +234,7 @@ the kill can't hang the agent.
 | `.steward.yaml` missing or invalid | no | `error` | notify |
 | `sops --decrypt` fails | no | `error` | notify |
 | Backup command exits non-zero | no | `error` | notify |
+| `podman pull`/pin of the delivered image fails | no | `error` | notify |
 | `compose up` / `systemctl restart` fails | **yes** | `failure` | rollback → notify |
 | Health check exhausts retries | **yes** | `failure` | rollback → notify |
 | Panic anywhere in the pipeline | no | `error` | notify |

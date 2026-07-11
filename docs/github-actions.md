@@ -438,6 +438,26 @@ The agent reads exactly these fields:
 }
 ```
 
+**Image-centric trigger** (for `path` / local projects — deploy a delivered
+container, no git). Two extra fields; a real GitHub push carries neither, so
+upstream webhooks are unaffected:
+
+```jsonc
+{
+  "project": "firecrew",                              // match a local project by name
+  "deploy_image": "ghcr.io/alex-savin/go-nttd:sha-abc" // image Steward pulls + pins
+}
+```
+
+`project` matches by name (omit it and `repository`/`ref` match a git project with
+an image override). Steward pulls `deploy_image`, re-points the manifest's
+`image.local_tag` to it, and restarts; rollback re-pins the previous image.
+
+For a **git** project with an image override you may also send `after`: include it
+to check out that commit *and* swap the image, or omit it to keep the current
+checkout and swap only the image (needs a prior successful checkout to read the
+definition from). Local (`path`) projects ignore `after` — they have no checkout.
+
 Headers the agent enforces:
 
 | Header | Value |
