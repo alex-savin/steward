@@ -67,15 +67,27 @@ type Defaults struct {
 	MaxQueue   int    `yaml:"max_queue"` // queued deployments per project, default 8
 }
 
-// Project maps a GitHub repository/branch to a local working checkout.
+// Project maps a trigger to a deployment source. A git project clones a repo at
+// the pushed SHA; a local project (Path set) reads its definition from a local
+// directory and skips git entirely — the image-centric model, where CI ships a
+// container and the hook says "deploy it" against a static local manifest.
 type Project struct {
-	Name     string `yaml:"name"`      // defaults to the repo name
-	Repo     string `yaml:"repo"`      // "owner/name" exactly as GitHub reports it
+	Name     string `yaml:"name"`      // defaults to the repo name; required for a local project
+	Repo     string `yaml:"repo"`      // "owner/name" match key; required unless Path is set
 	Branch   string `yaml:"branch"`    // deploy on pushes to this branch, default "main"
-	CloneURL string `yaml:"clone_url"` // default https://github.com/<repo>.git
+	CloneURL string `yaml:"clone_url"` // default https://github.com/<repo>.git (git projects)
 	Dir      string `yaml:"dir"`       // checkout dir, default <data_dir>/checkouts/<name>
-	Manifest string `yaml:"manifest"`  // manifest path within the repo, default ".steward.yaml"
+	Manifest string `yaml:"manifest"`  // manifest path within the source, default ".steward.yaml"
+
+	// Path makes this a LOCAL project: the manifest and unit/compose files are
+	// read from this directory in place, with no git clone. It is the deploy
+	// working directory. Mutually exclusive with clone-driven deploys.
+	Path string `yaml:"path"`
 }
+
+// IsLocal reports whether this project's definition comes from a local Path
+// rather than a git checkout.
+func (p *Project) IsLocal() bool { return p.Path != "" }
 
 // Load reads and validates the daemon configuration.
 func Load(path string) (*Config, error) {
@@ -170,33 +182,62 @@ func (c *Config) finalize() error {
 	seenDirs := map[string]int{}
 	for i := range c.Projects {
 		p := &c.Projects[i]
-		owner, name, ok := strings.Cut(p.Repo, "/")
-		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			errs = append(errs, fmt.Errorf("projects[%d].repo must be \"owner/name\", got %q", i, p.Repo))
-			continue
+
+		// Name: from repo for git projects, explicit for local ones.
+		if p.Name == "" && p.Repo != "" {
+			if _, name, ok := strings.Cut(p.Repo, "/"); ok {
+				p.Name = name
+			}
 		}
-		if p.Name == "" {
-			p.Name = name
+		if p.Branch == "" {
+			p.Branch = "main"
 		}
+		if p.Manifest == "" {
+			p.Manifest = ".steward.yaml"
+		}
+
+		if p.IsLocal() {
+			// Local project: read the definition from Path in place, no clone.
+			p.Path = expandHome(p.Path)
+			if !filepath.IsAbs(p.Path) {
+				errs = append(errs, fmt.Errorf("projects[%d].path %q must be absolute", i, p.Path))
+			}
+			if p.CloneURL != "" {
+				errs = append(errs, fmt.Errorf("projects[%d]: path and clone_url are mutually exclusive", i))
+			}
+			if p.Name == "" {
+				errs = append(errs, fmt.Errorf("projects[%d]: a local (path) project needs a name (or a repo to derive it)", i))
+				continue
+			}
+			p.Dir = p.Path // deploy from the local dir directly
+		} else {
+			// Git project: repo is required and must be "owner/name".
+			owner, name, ok := strings.Cut(p.Repo, "/")
+			if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+				errs = append(errs, fmt.Errorf("projects[%d].repo must be \"owner/name\" (or set path for a local project), got %q", i, p.Repo))
+				continue
+			}
+			if p.CloneURL == "" {
+				p.CloneURL = "https://github.com/" + p.Repo + ".git"
+			}
+			if p.Dir == "" {
+				p.Dir = filepath.Join(c.DataDir, "checkouts", p.Name)
+			}
+			p.Dir = expandHome(p.Dir)
+		}
+
 		// The name becomes a directory and state-file component.
 		if !filepath.IsLocal(p.Name) || strings.ContainsAny(p.Name, `/\`) {
 			errs = append(errs, fmt.Errorf("projects[%d].name %q must be a plain name", i, p.Name))
 			continue
 		}
-		if p.Branch == "" {
-			p.Branch = "main"
+
+		// Match key: repo@branch when a repo is set, else the project name
+		// (local projects are dispatched by name).
+		key := strings.ToLower(p.Name)
+		if p.Repo != "" {
+			key = strings.ToLower(p.Repo) + "@" + p.Branch
 		}
-		if p.CloneURL == "" {
-			p.CloneURL = "https://github.com/" + p.Repo + ".git"
-		}
-		if p.Dir == "" {
-			p.Dir = filepath.Join(c.DataDir, "checkouts", p.Name)
-		}
-		p.Dir = expandHome(p.Dir)
-		if p.Manifest == "" {
-			p.Manifest = ".steward.yaml"
-		}
-		key := strings.ToLower(p.Repo) + "@" + p.Branch
 		if seen[key] {
 			errs = append(errs, fmt.Errorf("duplicate project for %s", key))
 		}
@@ -261,8 +302,18 @@ func (c *Config) StateDir() string { return filepath.Join(c.DataDir, "state") }
 func (c *Config) FindProject(repoFullName, branch string) *Project {
 	for i := range c.Projects {
 		p := &c.Projects[i]
-		if strings.EqualFold(p.Repo, repoFullName) && p.Branch == branch {
+		if p.Repo != "" && strings.EqualFold(p.Repo, repoFullName) && p.Branch == branch {
 			return p
+		}
+	}
+	return nil
+}
+
+// FindProjectByName matches an image-centric dispatch to a project by its name.
+func (c *Config) FindProjectByName(name string) *Project {
+	for i := range c.Projects {
+		if strings.EqualFold(c.Projects[i].Name, name) {
+			return &c.Projects[i]
 		}
 	}
 	return nil

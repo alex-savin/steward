@@ -11,13 +11,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alex-savin/steward/internal/config"
 	"github.com/alex-savin/steward/internal/dispatch"
 )
 
 // maxWebhookBody caps payload reads. GitHub caps webhook payloads at 25 MB.
 const maxWebhookBody = 25 << 20
 
-// pushEvent is the subset of GitHub's push payload Steward acts on.
+// pushEvent is the subset of GitHub's push payload Steward acts on, plus two
+// optional Steward extensions for the image-centric trigger (deploy_image +
+// project). A real GitHub push carries neither, so behavior is unchanged for
+// upstream webhooks.
 type pushEvent struct {
 	Ref        string `json:"ref"`
 	After      string `json:"after"`
@@ -31,6 +35,10 @@ type pushEvent struct {
 	Pusher struct {
 		Name string `json:"name"`
 	} `json:"pusher"`
+
+	// Steward extensions (image-centric deploys):
+	DeployImage string `json:"deploy_image"` // container image the CD hook delivers
+	Project     string `json:"project"`      // match a local project by name
 }
 
 // handleWebhook validates and dispatches a GitHub webhook. Everything here is
@@ -71,30 +79,53 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "malformed payload", http.StatusBadRequest)
 		return
 	}
-	if ev.Deleted || ev.After == "" || ev.After == strings.Repeat("0", 40) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "branch deletion"})
-		return
-	}
 
-	branch := strings.TrimPrefix(ev.Ref, "refs/heads/")
-	project := s.cfg.FindProject(ev.Repository.FullName, branch)
-	if project == nil {
-		log.Info("webhook ignored: no matching project", "repo", ev.Repository.FullName, "ref", ev.Ref)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "no project configured for repo/branch"})
-		return
-	}
+	var project *config.Project
+	job := dispatch.Job{ID: dispatch.NewID(), ReceivedAt: time.Now()}
 
-	job := dispatch.Job{
-		ID:         dispatch.NewID(),
-		Project:    *project,
-		Ref:        ev.Ref,
-		SHA:        ev.After,
-		Pusher:     ev.Pusher.Name,
-		ReceivedAt: time.Now(),
+	if ev.DeployImage != "" {
+		// Image-centric trigger: a CD hook delivering a container to deploy.
+		// Match by project name when given (local projects), else by repo+branch.
+		if ev.Project != "" {
+			project = s.cfg.FindProjectByName(ev.Project)
+		} else {
+			project = s.cfg.FindProject(ev.Repository.FullName, strings.TrimPrefix(ev.Ref, "refs/heads/"))
+		}
+		if project == nil {
+			log.Info("image webhook ignored: no matching project", "project", ev.Project, "repo", ev.Repository.FullName)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "no project configured"})
+			return
+		}
+		job.Image = ev.DeployImage
+		job.SHA = ev.After // optional; a git project may pin both
+		job.Ref = ev.Ref
+		job.Message = "deploy image " + ev.DeployImage
+	} else {
+		// Standard GitHub push.
+		if ev.Deleted || ev.After == "" || ev.After == strings.Repeat("0", 40) {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "branch deletion"})
+			return
+		}
+		branch := strings.TrimPrefix(ev.Ref, "refs/heads/")
+		project = s.cfg.FindProject(ev.Repository.FullName, branch)
+		if project == nil {
+			log.Info("webhook ignored: no matching project", "repo", ev.Repository.FullName, "ref", ev.Ref)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "no project configured for repo/branch"})
+			return
+		}
+		if project.IsLocal() {
+			log.Info("push ignored: local project deploys are image-centric", "project", project.Name)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "local project requires a deploy_image trigger"})
+			return
+		}
+		job.Ref = ev.Ref
+		job.SHA = ev.After
+		job.Pusher = ev.Pusher.Name
+		if ev.HeadCommit != nil {
+			job.Message = firstLine(ev.HeadCommit.Message)
+		}
 	}
-	if ev.HeadCommit != nil {
-		job.Message = firstLine(ev.HeadCommit.Message)
-	}
+	job.Project = *project
 
 	// Validation done — answer immediately; the lifecycle runs in background.
 	status := s.disp.Enqueue(job)

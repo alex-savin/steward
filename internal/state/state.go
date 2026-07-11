@@ -21,8 +21,9 @@ func New(dir string) *Store { return &Store{dir: dir} }
 
 // Project is everything remembered about a project between deployments.
 type Project struct {
-	LastGoodSHA string    `json:"last_good_sha"`
-	DeployedAt  time.Time `json:"deployed_at"`
+	LastGoodSHA   string    `json:"last_good_sha"`
+	LastGoodImage string    `json:"last_good_image,omitempty"` // image-centric rollback target
+	DeployedAt    time.Time `json:"deployed_at"`
 }
 
 // Load returns the stored state, or the zero value if none exists yet.

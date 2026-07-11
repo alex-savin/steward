@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -125,18 +126,32 @@ func step(progress dispatch.Progress, name string) {
 //	checkout -> manifest -> [1] decrypt -> [2] backup -> [3] deploy
 //	          -> [4] verify -> [5] rollback (only if 3/4 failed)
 func (o *Orchestrator) execute(parent context.Context, log *slog.Logger, job dispatch.Job, progress dispatch.Progress) outcome {
-	// Checkout: bring the working copy to the exact pushed commit, under its
-	// own deadline (the manifest's timeout isn't known until after this).
-	step(progress, "checkout")
 	workdir := job.Project.Dir
-	syncCtx, cancelSync := context.WithTimeout(parent, checkoutTimeout)
-	err := git.Sync(syncCtx, log, job.Project.CloneURL, workdir, job.SHA)
-	cancelSync()
-	if err != nil {
-		return outcome{step: "checkout", err: err}
+
+	// Checkout: git projects clone the pushed SHA; local (path) projects read
+	// their definition in place and skip git entirely. An image-centric deploy
+	// to a git project may omit the SHA, meaning "keep the current checkout and
+	// just swap the image" — that also skips git, but needs a prior checkout.
+	step(progress, "checkout")
+	switch {
+	case job.Project.IsLocal():
+		log.Info("local project: reading definition from path", "path", workdir)
+	case job.SHA == "":
+		if _, err := os.Stat(filepath.Join(workdir, ".git")); err != nil {
+			return outcome{step: "checkout", err: fmt.Errorf(
+				"image deploy without a commit needs an existing checkout in %s: %w", workdir, err)}
+		}
+		log.Info("image-only deploy: keeping existing checkout", "dir", workdir)
+	default:
+		syncCtx, cancelSync := context.WithTimeout(parent, checkoutTimeout)
+		err := git.Sync(syncCtx, log, job.Project.CloneURL, workdir, job.SHA)
+		cancelSync()
+		if err != nil {
+			return outcome{step: "checkout", err: err}
+		}
 	}
 
-	// Manifest: the repo's committed .steward.yaml drives everything below.
+	// Manifest: the committed .steward.yaml drives everything below.
 	step(progress, "manifest")
 	m, err := config.LoadManifest(filepath.Join(workdir, job.Project.Manifest))
 	if err != nil {
@@ -149,7 +164,7 @@ func (o *Orchestrator) execute(parent context.Context, log *slog.Logger, job dis
 	defer cancel()
 
 	// Deployment identity, exported to every child process (see jobEnv).
-	env := jobEnv(m, job.Project.Name, job.Ref, job.SHA)
+	env := jobEnv(m, job.Project.Name, job.Ref, job.SHA, job.Image)
 
 	stack, err := NewStack(m, workdir, env, log)
 	if err != nil {
@@ -178,6 +193,9 @@ func (o *Orchestrator) execute(parent context.Context, log *slog.Logger, job dis
 			snap, err = runBackup(ctx, log, workdir, m, job.SHA, env)
 			return err
 		}},
+		{"image", func(ctx context.Context) error { // Step 2.5 — pull + pin the delivered image (no-op when none)
+			return pinImage(ctx, log, m, job.Image, env)
+		}},
 		{"deploy", func(ctx context.Context) error { // Step 3 — compose up / quadlet install+restart
 			return stack.Deploy(ctx)
 		}},
@@ -196,21 +214,30 @@ func (o *Orchestrator) execute(parent context.Context, log *slog.Logger, job dis
 			// Step 5 — rollback, but only once the stack may have been
 			// touched. Failures in secrets/backup abort before any change.
 			if s.name == "deploy" || s.name == "verify" {
+				// Rollback only once the stack may have been touched. An image
+				// pull/pin failure (the "image" step) happens before deploy and
+				// leaves the running stack and its LocalTag untouched, so it is
+				// infrastructure trouble reported as an error — NOT a reason to
+				// stop the healthy stack and restore volumes over live data.
+				//
 				// Capture the stack's own output first: rollback restarts the
-				// previous version and destroys the only evidence of why this
-				// one didn't come up.
+				// previous version and destroys the only evidence of the failure.
 				out.logs = captureLogs(parent, log, stack)
 
 				step(progress, "rollback")
 				out.rolledBack = true
-				out.rollbackErr = o.rollback(parent, log, job, m, stack, snap, prev.LastGoodSHA)
+				out.rollbackErr = o.rollback(parent, log, job, m, stack, snap, prev)
 			}
 			return out
 		}
 	}
 
-	// Success: this commit becomes the rollback target for next time.
-	if err := o.states.Save(job.Project.Name, state.Project{LastGoodSHA: job.SHA, DeployedAt: time.Now().UTC()}); err != nil {
+	// Success: this commit/image becomes the rollback target for next time.
+	if err := o.states.Save(job.Project.Name, state.Project{
+		LastGoodSHA:   job.SHA,
+		LastGoodImage: job.Image,
+		DeployedAt:    time.Now().UTC(),
+	}); err != nil {
 		log.Warn("could not persist last-good state", "error", err)
 	}
 	log.Info("deployment succeeded")
@@ -249,18 +276,19 @@ func captureLogs(parent context.Context, log *slog.Logger, stack Stack) string {
 // context): parent has no deployment timeout — the expired deployment context
 // was a child created in execute — but it IS cancelled on forced shutdown,
 // which must abort rollback too.
-func (o *Orchestrator) rollback(parent context.Context, log *slog.Logger, job dispatch.Job, m *config.Manifest, failed Stack, snap *Snapshot, lastGoodSHA string) error {
-	if lastGoodSHA == "" && (snap == nil || len(snap.Volumes) == 0) {
+func (o *Orchestrator) rollback(parent context.Context, log *slog.Logger, job dispatch.Job, m *config.Manifest, failed Stack, snap *Snapshot, prev state.Project) error {
+	hasVolumes := snap != nil && len(snap.Volumes) > 0
+	if prev.LastGoodSHA == "" && prev.LastGoodImage == "" && !hasVolumes {
 		return errors.New("nothing to roll back to (no previous successful deploy recorded)")
 	}
 	ctx, cancel := context.WithTimeout(parent, rollbackGrace)
 	defer cancel()
 
-	log.Warn("rolling back", "to", shortSHA(lastGoodSHA))
+	log.Warn("rolling back", "to_sha", shortSHA(prev.LastGoodSHA), "to_image", prev.LastGoodImage)
 	var errs []error
 
 	// Quiesce the failed stack before touching its data (best effort).
-	if failed != nil && snap != nil && len(snap.Volumes) > 0 {
+	if failed != nil && hasVolumes {
 		if err := failed.Stop(ctx); err != nil {
 			log.Warn("could not stop failed stack before restore", "error", err)
 		}
@@ -270,9 +298,22 @@ func (o *Orchestrator) rollback(parent context.Context, log *slog.Logger, job di
 		errs = append(errs, err)
 	}
 
-	if lastGoodSHA != "" {
-		if err := git.Sync(ctx, log, job.Project.CloneURL, job.Project.Dir, lastGoodSHA); err != nil {
-			errs = append(errs, fmt.Errorf("checkout last-good %s: %w", shortSHA(lastGoodSHA), err))
+	// How to revert the definition depends on where it came from:
+	//   - No previous commit to check out (local projects always; git projects
+	//     deployed image-only) — the definition is static/in place, so rolling
+	//     back means re-pinning the previous image and redeploying the same units.
+	//   - Git project with a previous commit — revert to that SHA, and (for
+	//     quadlet image-pinning) re-point the LocalTag back to the previous image.
+	switch {
+	case job.Project.IsLocal() || prev.LastGoodSHA == "":
+		if prev.LastGoodImage != "" {
+			if err := o.rollbackImage(ctx, log, job, m, prev); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	default:
+		if err := git.Sync(ctx, log, job.Project.CloneURL, job.Project.Dir, prev.LastGoodSHA); err != nil {
+			errs = append(errs, fmt.Errorf("checkout last-good %s: %w", shortSHA(prev.LastGoodSHA), err))
 		} else {
 			// The previous commit may declare a different stack layout or
 			// secrets set — honor ITS manifest, not the broken one.
@@ -286,7 +327,16 @@ func (o *Orchestrator) rollback(parent context.Context, log *slog.Logger, job di
 			}
 			// The restored commit's env: its compose file must resolve to the
 			// image tag it was originally deployed with, not the failed SHA.
-			prevEnv := jobEnv(prevManifest, job.Project.Name, job.Ref, lastGoodSHA)
+			prevEnv := jobEnv(prevManifest, job.Project.Name, job.Ref, prev.LastGoodSHA, prev.LastGoodImage)
+			// Quadlet Image= is static, so reverting the .container file is not
+			// enough: re-point the LocalTag back to the previous good image, or
+			// the redeployed "previous" units keep running the failed one.
+			// (No-op for compose or when no local_tag/image is set.)
+			if prev.LastGoodImage != "" {
+				if err := repinImage(ctx, log, prevManifest, prev.LastGoodImage, prevEnv); err != nil {
+					errs = append(errs, err)
+				}
+			}
 			prevStack, err := NewStack(prevManifest, job.Project.Dir, prevEnv, log)
 			switch {
 			case err != nil:
@@ -313,7 +363,36 @@ func (o *Orchestrator) rollback(parent context.Context, log *slog.Logger, job di
 		log.Error("rollback finished with errors", "error", err)
 		return err
 	}
-	log.Info("rollback complete", "restored", shortSHA(lastGoodSHA))
+	restored := shortSHA(prev.LastGoodSHA)
+	if restored == "" {
+		restored = prev.LastGoodImage
+	}
+	log.Info("rollback complete", "restored", restored)
+	return nil
+}
+
+// rollbackImage reverts a project whose definition is static/in place (a local
+// path project, or a git project deployed image-only with no pinned commit): it
+// re-pins the previous image, redeploys the same units, and health-checks the
+// result. Returns an error if there is no previous image to fall back to.
+func (o *Orchestrator) rollbackImage(ctx context.Context, log *slog.Logger, job dispatch.Job, m *config.Manifest, prev state.Project) error {
+	if prev.LastGoodImage == "" {
+		return errors.New("no previous image to roll back to (first deploy?)")
+	}
+	env := jobEnv(m, job.Project.Name, job.Ref, prev.LastGoodSHA, prev.LastGoodImage)
+	if err := repinImage(ctx, log, m, prev.LastGoodImage, env); err != nil {
+		return err
+	}
+	prevStack, err := NewStack(m, job.Project.Dir, env, log)
+	if err != nil {
+		return err
+	}
+	if err := prevStack.Deploy(ctx); err != nil {
+		return fmt.Errorf("redeploy previous version: %w", err)
+	}
+	if err := verifyHealth(ctx, log, job.Project.Dir, m.HealthCheck, env); err != nil {
+		return fmt.Errorf("rolled-back version did not become healthy: %w", err)
+	}
 	return nil
 }
 
@@ -352,17 +431,28 @@ func (o *Orchestrator) report(ctx context.Context, log *slog.Logger, job dispatc
 		name += " (" + out.manifest.Environment + ")"
 	}
 
+	// Deploy identity for the message: repo for git projects, project name for
+	// local ones; ref is the short SHA or, for image-centric deploys, the image.
+	ident := job.Project.Repo
+	if ident == "" {
+		ident = job.Project.Name
+	}
+	ref := shortSHA(job.SHA)
+	if ref == "" {
+		ref = job.Image
+	}
+
 	// One rendering of the result, shared by every push channel. job.Message is
 	// attacker-influenced (it is a commit subject); channels escape it.
 	var title string
 	var lines []string
 	if out.err == nil {
 		title = "Deployed " + name
-		lines = []string{fmt.Sprintf("%s in %s", job.Project.Repo, elapsed)}
+		lines = []string{fmt.Sprintf("%s in %s", ident, elapsed)}
 	} else {
 		title = "Deploy FAILED: " + name
 		lines = []string{
-			job.Project.Repo,
+			ident,
 			fmt.Sprintf("step %q: %v", out.step, out.err),
 		}
 		if out.rolledBack {
@@ -378,9 +468,9 @@ func (o *Orchestrator) report(ctx context.Context, log *slog.Logger, job dispatc
 	}
 
 	if n := out.manifest.Notifications.Ntfy; n != nil {
-		// ntfy is plain text with no link support, so the SHA goes in the body.
+		// ntfy is plain text with no link support, so the ref goes in the body.
 		// (Telegram renders it as a link instead — see TelegramMessage.SHA.)
-		body := append([]string{shortSHA(job.SHA)}, lines...)
+		body := append([]string{ref}, lines...)
 		if out.logs != "" {
 			body = append(body, "", "--- logs ---", lastLines(out.logs, notifyLogLines))
 		}
@@ -401,7 +491,7 @@ func (o *Orchestrator) report(ctx context.Context, log *slog.Logger, job dispatc
 			Title:     title,
 			Lines:     lines,
 			Failed:    out.err != nil,
-			SHA:       shortSHA(job.SHA),
+			SHA:       ref,
 			CommitURL: o.commitURL(job),
 			Log:       lastLines(out.logs, notifyLogLines),
 		}); err != nil {
@@ -429,7 +519,7 @@ func lastLines(s string, n int) string {
 // commitURL links the SHA in a notification back to GitHub. Returns "" for a
 // GitHub Enterprise install, whose web host we cannot infer from the API URL.
 func (o *Orchestrator) commitURL(job dispatch.Job) string {
-	if o.cfg.GitHub.APIURL != "https://api.github.com" {
+	if job.SHA == "" || job.Project.IsLocal() || o.cfg.GitHub.APIURL != "https://api.github.com" {
 		return ""
 	}
 	return "https://github.com/" + job.Project.Repo + "/commit/" + job.SHA
@@ -452,7 +542,11 @@ func (o *Orchestrator) ReportSuperseded(dropped, by dispatch.Job) {
 
 // setCommitStatus posts to the GitHub Commit Statuses API. The status context
 // is stable per project so pending/success/failure collapse into one check.
+// Skipped for local/image-centric deploys, which have no GitHub commit to mark.
 func (o *Orchestrator) setCommitStatus(ctx context.Context, job dispatch.Job, ghState, desc string) {
+	if job.Project.IsLocal() || job.SHA == "" {
+		return
+	}
 	statusCtx := "steward/" + job.Project.Name
 	if err := o.github.SetCommitStatus(ctx, job.Project.Repo, job.SHA, ghState, statusCtx, desc); err != nil {
 		o.log.Warn("github commit status failed", "project", job.Project.Name, "state", ghState, "error", err)
