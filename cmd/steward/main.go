@@ -101,6 +101,8 @@ func run() error {
 	}
 	defer lock.Release()
 
+	warnOpenPolicies(log, cfg)
+
 	orch := deploy.New(cfg, log)
 	disp := dispatch.New(dispatch.Options{
 		Run:         orch.Run,
@@ -146,4 +148,18 @@ func run() error {
 
 	log.Info("shutdown complete")
 	return nil
+}
+
+// warnOpenPolicies logs, once at startup, each project that runs with one of
+// the deploy guards relaxed, so a permissive config is visible in the journal.
+func warnOpenPolicies(log *slog.Logger, cfg *config.Config) {
+	for _, p := range cfg.Projects {
+		if len(p.Images) == 0 {
+			log.Warn("project accepts any deploy_image; set images: to restrict it", "project", p.Name)
+		}
+		if p.AllowAnyCommit {
+			log.Warn("project deploys any commit on the origin, not only its branch (allow_any_commit)",
+				"project", p.Name, "branch", p.Branch)
+		}
+	}
 }

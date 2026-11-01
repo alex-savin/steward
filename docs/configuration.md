@@ -87,6 +87,8 @@ only name the *chat*.
 | `dir` | path | `<data_dir>/checkouts/<name>` | Must be unique across projects. |
 | `manifest` | path | `.steward.yaml` | Manifest path within the source. |
 | `path` | path | — | **Local project:** read the manifest + units from this absolute dir, no git clone. See below. |
+| `images` | list of strings | — (any image) | Allowlist of image repositories a `deploy_image` may name. See [deploy guards](#deploy-guards). |
+| `allow_any_commit` | bool | `false` | Git projects only. Skip the branch ancestry check and deploy any commit the origin has. See [deploy guards](#deploy-guards). |
 
 **Local (image-centric) projects.** Set `path` instead of `clone_url` to deploy
 from a directory already on the host — no repo clone. These projects are driven by
@@ -119,6 +121,57 @@ projects:
     branch: staging
     name: my-awesome-app-staging
 ```
+
+### Deploy guards
+
+The webhook secret authenticates a request, but a leaked secret (or a CI job
+in the wrong repo) should not be able to deploy *anything*. Two per-project
+checks narrow what a valid request can deploy. Both refuse before secrets are
+decrypted or backup commands run, and are reported as a pre-deploy `error`
+commit status with no rollback — the running stack is never touched.
+
+**Branch ancestry (git projects, always on).** After fetching, the agent runs
+`git merge-base --is-ancestor <sha> origin/<branch>`: the SHA must be the
+branch head or an older commit on it. A commit that exists on the origin but
+only on another branch, a PR head, or an unmerged fork commit is refused with
+`commit is not on the deployed branch`, and the checkout stays at the previous
+deploy. Dispatching an older SHA from the branch — a manual rollback — still
+works. Automatic rollback to `last_good_sha` skips the check, so a force-push
+that rewrote the branch cannot strand it. The SHA itself must be a hex object
+name (7–64 chars); branch names and anything option-shaped are rejected.
+
+Set `allow_any_commit: true` to turn the check off for a project — for example
+to deploy tags cut from release branches, or to dispatch a SHA a force-push
+removed from the branch. The agent logs a warning at startup for every project
+that sets it.
+
+**Image allowlist (`images`).** Repository prefixes that `deploy_image` must
+match:
+
+```yaml
+projects:
+  - repo: alex-savin/family-tree-savin-nyc
+    branch: main
+    images:
+      - registry.savin.nyc/familytree/app
+```
+
+The tag or digest is stripped from the delivered reference and the remaining
+repository must equal an entry or sit below it on a `/` boundary. With the entry
+above:
+
+| `deploy_image` | Allowed |
+| --- | --- |
+| `registry.savin.nyc/familytree/app:sha-9f2a1c3` | ✓ |
+| `registry.savin.nyc/familytree/app@sha256:4b1e…` | ✓ |
+| `registry.savin.nyc/familytree/app/worker:v2` | ✓ |
+| `registry.savin.nyc/familytree/app-evil:v1` | ✗ |
+| `familytree/app:v1` | ✗ — matching is literal, with no short-name or `docker.io` expansion |
+
+Entries must be bare repositories (a `:tag` or `@digest` in an entry is a
+startup error; a registry port such as `localhost:5000/team` is fine). Without
+`images`, any image is accepted — the behavior before this key existed — and
+the agent logs a warning at startup for that project.
 
 ---
 
@@ -164,11 +217,13 @@ image:
 ```
 
 Optional. When a deploy carries an image (a `deploy_image` trigger), Steward
+checks it against the project's [`images`](#deploy-guards) allowlist, then
 `podman pull`s it and re-tags `local_tag` to it before restarting — because a
 quadlet unit's `Image=` line is static, this is how a CD-delivered image reaches
 the running unit. Point the unit's `Image=` at `local_tag`. Rollback re-pins the
 previous image (stored as `last_good_image`), so don't aggressively prune old
-images.
+images. A digest reference (`repo@sha256:…`) works as-is for pull, pin, and
+rollback, and is the most exact rollback target.
 
 For a **compose** stack, omit this and reference `${STEWARD_IMAGE}` in the compose
 file instead — Steward exports it and `compose up` pulls it.

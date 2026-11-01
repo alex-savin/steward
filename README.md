@@ -160,6 +160,10 @@ location /webhook/github {
 - Manifest commands (backup hooks, command health checks) run as the agent
   user: anyone who can push to a deployed branch can execute commands, same
   trust model as self-hosted CI. Run the agent as a dedicated user.
+- The webhook secret alone cannot deploy an arbitrary commit or image: a SHA
+  must be on the project's branch at the origin, and `deploy_image` must match
+  the project's `images:` allowlist when one is set
+  ([deploy guards](docs/configuration.md#deploy-guards)).
 - One instance per host, enforced with an flock(2) lock file.
 - The Telegram bot token lives in the agent config, never in a repo-committed
   manifest, and is scrubbed from error text before it reaches the logs (the Bot

@@ -430,7 +430,7 @@ The agent reads exactly these fields:
 ```jsonc
 {
   "ref": "refs/heads/main",           // branch must match the project's `branch`
-  "after": "9f2a1c…",                 // 40-char SHA, must exist on the origin
+  "after": "9f2a1c…",                 // 40-char SHA, must be on origin/<branch>
   "deleted": false,                   // true → ignored
   "repository": { "full_name": "alex-savin/my-awesome-app" },
   "pusher":     { "name": "alex-savin" },        // logging only
@@ -450,8 +450,10 @@ upstream webhooks are unaffected:
 ```
 
 `project` matches by name (omit it and `repository`/`ref` match a git project with
-an image override). Steward pulls `deploy_image`, re-points the manifest's
-`image.local_tag` to it, and restarts; rollback re-pins the previous image.
+an image override). Steward checks `deploy_image` against the project's
+[`images`](configuration.md#deploy-guards) allowlist, pulls it, re-points the
+manifest's `image.local_tag` to it, and restarts; rollback re-pins the previous
+image. Either a tag (`repo:sha-abc`) or a digest (`repo@sha256:…`) works.
 
 For a **git** project with an image override you may also send `after`: include it
 to check out that commit *and* swap the image, or omit it to keep the current
@@ -485,10 +487,33 @@ A `429` was previously returned when a project's queue filled up. Queue mode now
 coalesces to a single pending job, so it can no longer happen; the script still
 recognises the code.
 
-The commit must already exist on the origin — the agent fetches it. In a normal
-`on: push` workflow it does. If you dispatch from a `pull_request` event,
-`github.sha` is a synthetic merge commit that the agent cannot fetch; use
-`github.event.pull_request.head.sha` and make sure the branch is pushed.
+The commit must already be on the project's branch at the origin — the agent
+fetches it and refuses a SHA that is not an ancestor of `origin/<branch>`. In a
+normal `on: push` workflow it is. A `pull_request` dispatch is refused: neither
+the synthetic merge commit (`github.sha`) nor the PR head is on the deployed
+branch. Deploy after merge, or set
+[`allow_any_commit`](configuration.md#deploy-guards) on a staging project that
+should take unmerged commits.
+
+### What the secret does and does not grant
+
+The HMAC secret proves a request came from someone holding it. It does **not**
+make every payload deployable: the agent additionally enforces, per project,
+
+- **branch ancestry** — `after` must be on `origin/<branch>`, so the secret
+  cannot deploy (and run the `.steward.yaml` backup commands of) an arbitrary
+  commit pushed to some other branch or PR;
+- **image allowlist** — with `images:` set, `deploy_image` must name one of the
+  listed repositories, so the secret cannot make the host pull and run an
+  arbitrary container.
+
+Both refusals happen before anything on the host changes and show up as an
+`error` commit status (`checkout failed: … not on the deployed branch` or
+`image failed: … not in the project's images allowlist`) plus the manifest's
+ntfy/Telegram notification where one can be sent. The webhook itself still
+answers `202` — the checks need the fetched repository, so they run on the
+deployment worker. Set `images:` on every project that takes image deploys; see
+[deploy guards](configuration.md#deploy-guards).
 
 ## Troubleshooting
 
@@ -520,6 +545,15 @@ whose compose file pins a moving tag that was already present locally. Use
 status; or the project name differs from the repo name and the default
 `status-context` is wrong. `curl -s http://agent:8484/status` shows whether the
 deployment is still running.
+
+**`checkout failed: commit is not on the deployed branch`** — the dispatched
+SHA is not an ancestor of `origin/<branch>`: a PR head, a commit on another
+branch, or one a force-push removed. Dispatch a commit from the branch, or see
+[`allow_any_commit`](configuration.md#deploy-guards).
+
+**`image failed: … not in the project's images allowlist`** — `deploy_image`
+does not match the project's `images:`. Compare the registry host and path
+literally; `ghcr.io/o/app` and `docker.io/o/app` are different entries.
 
 **Image pulls fail on the host** — the *agent's* user, not the runner, pulls the
 image. `sudo -u steward docker pull ghcr.io/...` to reproduce, then

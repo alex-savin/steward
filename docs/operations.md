@@ -143,7 +143,10 @@ GITHUB_SHA=$(git rev-parse HEAD~1) ./scripts/steward-dispatch.sh
 ```
 
 The agent checks that commit out, runs its manifest, and if it passes the health
-check it becomes the new last-known-good. This is safer than editing state by
+check it becomes the new last-known-good. The SHA must still be on the project's
+branch; if a force-push removed it, the dispatch is refused — set
+[`allow_any_commit`](configuration.md#deploy-guards) temporarily, or rely on the
+automatic rollback, which is exempt. This is safer than editing state by
 hand, because it exercises the same path as any other deployment.
 
 **Inspect the rollback target:**
@@ -254,6 +257,14 @@ deployed branch can run arbitrary commands as the agent's user. **This is the
 intended trust model** — the same one self-hosted CI has — and it is why the
 agent must run as a dedicated, unprivileged user, not root. Protect deployed
 branches accordingly (branch protection, required reviews).
+
+**What the webhook secret can do.** Less than a push. The agent deploys only a
+SHA that is on `origin/<branch>` (`git merge-base --is-ancestor`), so the secret
+cannot run the manifest of a commit sitting on another branch, a PR, or a fork's
+pushed ref. With `images:` set, it can only deliver images from the listed
+repositories. Without `images:`, a secret holder can make the host pull and run
+any image — the agent warns about each such project at startup. See
+[deploy guards](configuration.md#deploy-guards).
 
 **What is contained.** Secret `source` and `destination` paths are validated at
 manifest load to stay inside the checkout: absolute paths and `..` are rejected,

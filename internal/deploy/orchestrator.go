@@ -143,8 +143,14 @@ func (o *Orchestrator) execute(parent context.Context, log *slog.Logger, job dis
 		}
 		log.Info("image-only deploy: keeping existing checkout", "dir", workdir)
 	default:
+		// Only commits on the project's branch, unless the operator opted out.
+		// A refused SHA is a pre-deploy error: nothing was checked out or run.
+		branch := job.Project.Branch
+		if job.Project.AllowAnyCommit {
+			branch = ""
+		}
 		syncCtx, cancelSync := context.WithTimeout(parent, checkoutTimeout)
-		err := git.Sync(syncCtx, log, job.Project.CloneURL, workdir, job.SHA)
+		err := git.Sync(syncCtx, log, job.Project.CloneURL, workdir, job.SHA, branch)
 		cancelSync()
 		if err != nil {
 			return outcome{step: "checkout", err: err}
@@ -158,6 +164,14 @@ func (o *Orchestrator) execute(parent context.Context, log *slog.Logger, job dis
 		return outcome{step: "manifest", err: err}
 	}
 	log = log.With("stack", m.Stack, "environment", m.Environment)
+
+	// Image allowlist: refuse before secrets and backup commands run. Checked
+	// after the manifest load (not before checkout) only so the refusal reaches
+	// the manifest's notification channels; it is still a pre-deploy error.
+	if job.Image != "" && !job.Project.AllowsImage(job.Image) {
+		return outcome{manifest: m, step: "image", err: fmt.Errorf(
+			"image %q is not in the project's images allowlist", job.Image)}
+	}
 
 	// One deadline (deployment.timeout) covers the whole lifecycle.
 	ctx, cancel := context.WithTimeout(parent, m.Deployment.Timeout.Std())
@@ -312,7 +326,9 @@ func (o *Orchestrator) rollback(parent context.Context, log *slog.Logger, job di
 			}
 		}
 	default:
-		if err := git.Sync(ctx, log, job.Project.CloneURL, job.Project.Dir, prev.LastGoodSHA); err != nil {
+		// No branch check: the last-good SHA was on the branch when it deployed,
+		// and a force-push since then must not strand the rollback.
+		if err := git.Sync(ctx, log, job.Project.CloneURL, job.Project.Dir, prev.LastGoodSHA, ""); err != nil {
 			errs = append(errs, fmt.Errorf("checkout last-good %s: %w", shortSHA(prev.LastGoodSHA), err))
 		} else {
 			// The previous commit may declare a different stack layout or
