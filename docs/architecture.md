@@ -231,9 +231,11 @@ the kill can't hang the agent.
 | Bad HMAC signature | — | none | `401`, nothing enqueued |
 | Repo/branch not configured | — | none | `200 ignored` |
 | `git fetch`/`checkout` fails | no | `error` | notify |
+| SHA not on `origin/<branch>` (ancestry check) | no | `error` | notify |
 | `.steward.yaml` missing or invalid | no | `error` | notify |
 | `sops --decrypt` fails | no | `error` | notify |
 | Backup command exits non-zero | no | `error` | notify |
+| `deploy_image` outside the project's `images` allowlist | no | `error` | notify |
 | `podman pull`/pin of the delivered image fails | no | `error` | notify |
 | `compose up` / `systemctl restart` fails | **yes** | `failure` | rollback → notify |
 | Health check exhausts retries | **yes** | `failure` | rollback → notify |

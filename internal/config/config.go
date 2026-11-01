@@ -83,6 +83,15 @@ type Project struct {
 	// read from this directory in place, with no git clone. It is the deploy
 	// working directory. Mutually exclusive with clone-driven deploys.
 	Path string `yaml:"path"`
+
+	// Images is the allowlist of image repositories a deploy_image may name,
+	// as repository prefixes ("registry.example.com/team/app"). Empty accepts
+	// any image — the pre-allowlist behavior, warned about at startup.
+	Images []string `yaml:"images"`
+
+	// AllowAnyCommit turns off the branch ancestry check: by default a git
+	// project only deploys a SHA reachable from origin/<branch>.
+	AllowAnyCommit bool `yaml:"allow_any_commit"`
 }
 
 // IsLocal reports whether this project's definition comes from a local Path
@@ -210,6 +219,9 @@ func (c *Config) finalize() error {
 				continue
 			}
 			p.Dir = p.Path // deploy from the local dir directly
+			if p.AllowAnyCommit {
+				errs = append(errs, fmt.Errorf("projects[%d]: allow_any_commit only applies to git projects (no path)", i))
+			}
 		} else {
 			// Git project: repo is required and must be "owner/name".
 			owner, name, ok := strings.Cut(p.Repo, "/")
@@ -224,6 +236,13 @@ func (c *Config) finalize() error {
 				p.Dir = filepath.Join(c.DataDir, "checkouts", p.Name)
 			}
 			p.Dir = expandHome(p.Dir)
+		}
+
+		for j, img := range p.Images {
+			if err := validImagePrefix(img); err != nil {
+				errs = append(errs, fmt.Errorf("projects[%d].images[%d]: %w", i, j, err))
+			}
+			p.Images[j] = strings.TrimSuffix(img, "/")
 		}
 
 		// The name becomes a directory and state-file component.
@@ -260,6 +279,52 @@ func (c *Config) finalize() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// validImagePrefix checks an images: entry is a bare repository (prefix): no
+// tag or digest, since those would make every new build fail the allowlist.
+func validImagePrefix(s string) error {
+	s = strings.TrimSuffix(s, "/")
+	switch {
+	case s == "":
+		return errors.New("empty image repository")
+	case strings.ContainsAny(s, " \t@") || strings.HasPrefix(s, "-"):
+		return fmt.Errorf("%q is not an image repository", s)
+	case imageRepository(s) != s:
+		return fmt.Errorf("%q must be a repository without a tag", s)
+	}
+	return nil
+}
+
+// imageRepository strips the digest ("@sha256:…") and tag (":v1") from an image
+// reference, leaving the repository. A colon before the last slash is a
+// registry port ("host:5000/app"), not a tag.
+func imageRepository(ref string) string {
+	ref, _, _ = strings.Cut(ref, "@")
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		ref = ref[:i]
+	}
+	return ref
+}
+
+// AllowsImage reports whether a deploy_image reference is permitted for this
+// project. With no images: allowlist every image is allowed. Otherwise the
+// reference's repository must equal an entry or sit beneath it as a path:
+// "reg/team/app" admits "reg/team/app:v1", "reg/team/app@sha256:…" and
+// "reg/team/app/worker:v1", but not "reg/team/app-evil:v1". Matching is
+// literal — no short-name or docker.io expansion — so list the exact
+// registry host the CD pipeline pushes to.
+func (p *Project) AllowsImage(ref string) bool {
+	if len(p.Images) == 0 {
+		return true
+	}
+	repo := imageRepository(ref)
+	for _, prefix := range p.Images {
+		if repo == prefix || strings.HasPrefix(repo, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // firstValue resolves a credential from an inline value, a file, or an env var.

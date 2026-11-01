@@ -47,6 +47,14 @@ func TestPinImageQuadletPullsAndTags(t *testing.T) {
 	}
 }
 
+// The delivered image lands in podman's argv; an option-shaped ref is refused.
+func TestPinImageRejectsOptionLikeRef(t *testing.T) {
+	m := &config.Manifest{Stack: config.StackQuadlet}
+	if err := pinImage(context.Background(), quiet(), m, "--authfile=/etc/shadow", nil); err == nil {
+		t.Error("an image starting with '-' must be refused")
+	}
+}
+
 // repinImage (rollback) re-tags a previous image to the LocalTag.
 func TestRepinImage(t *testing.T) {
 	dir := t.TempDir()

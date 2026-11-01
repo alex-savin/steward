@@ -41,3 +41,19 @@ projects:
     # clone_url: git@github.com:alex/my-awesome-app.git
     # dir: /var/lib/steward/checkouts/my-awesome-app
     # manifest: .steward.yaml
+    #
+    # Deploy guards. Only commits on origin/<branch> deploy; allow_any_commit
+    # turns that off (tags off release branches, force-pushed SHAs).
+    # allow_any_commit: false
+    #
+    # Image repositories a deploy_image may name (prefixes, matched on a "/"
+    # boundary; tags and @sha256 digests both match). Unset = any image, and a
+    # startup warning. Set it on every project that takes image deploys.
+    # images:
+    #   - ghcr.io/alex/my-awesome-app
+
+  # A local (image-centric) project: no git, deployed by a deploy_image trigger.
+  # - name: firecrew
+  #   path: /opt/firecrew/src
+  #   images:
+  #     - ghcr.io/alex/go-nttd

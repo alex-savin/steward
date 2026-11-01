@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/alex-savin/steward/internal/config"
 	"github.com/alex-savin/steward/internal/execx"
@@ -18,11 +19,16 @@ import (
 // `compose up` pulls it.
 //
 // The delivered `image` should be an immutable ref (a per-build tag like
-// `sha-abc` or a `@sha256:` digest) so the value later recorded as the rollback
-// target points at exactly this build.
+// `sha-abc` or a `repo@sha256:…` digest) so the value later recorded as the
+// rollback target points at exactly this build. Digest refs need no special
+// casing: `podman pull` and `podman tag` both accept them as-is.
 func pinImage(ctx context.Context, log *slog.Logger, m *config.Manifest, image string, env []string) error {
 	if image == "" || m.Stack != config.StackQuadlet {
 		return nil
+	}
+	// The image comes from the webhook payload and lands in podman's argv.
+	if strings.HasPrefix(image, "-") {
+		return fmt.Errorf("invalid image reference %q", image)
 	}
 	log.Info("pulling delivered image", "image", image)
 	if _, err := execx.Run(ctx, "", env, "podman", "pull", image); err != nil {
